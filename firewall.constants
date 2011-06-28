@@ -1,0 +1,23 @@
+#
+# File:	/etc/firewall/firewall.constants
+#
+# Firewall Constants
+#
+# This file contains constants values
+
+# CONSTANTS
+ANYWHERE="0.0.0.0/0"			    # Match any IP address
+BROADCAST_SRC="0.0.0.0"			    # Broadcast Source Address
+BROADCAST_DEST="255.255.255.255"	# Broadcast Destination Address
+CLASS_A="10.0.0.0/8"			    # Class-A Private (RFC-1918) Networks
+CLASS_B="172.16.0.0/12"			    # Class-B Private (RFC-1918) Networks
+CLASS_C="192.168.0.0/16"		    # Class-C Private (RFC-1918) Networks
+CLASS_D_MULTICAST="224.0.0.0/4"		# Class-D Multicast Addresses
+CLASS_E_RESERVED_NET="240.0.0.0/5"	# Class-E Reserved Addresses
+PRIVPORTS="0:1023"			        # Well-Known, Privileged Port Range
+UNPRIVPORTS="1024:65535"		    # Unprivileged Port Range
+TRACEROUTE_SRC_PORTS="32769:65535"	# Traceroute Source Ports
+TRACEROUTE_DEST_PORTS="33434:33523"	# Traceroute Destination Ports
+LOOPBACK_INTERFACE="lo"		        # The loopback interface
+LOOPBACK_NETWORK="127.0.0.0/8"      # Reserved Loopback Address Range
+

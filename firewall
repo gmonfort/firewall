@@ -109,6 +109,14 @@ disable_firewall() {
    echo
 }
 
+if [ -f /etc/firewall/firewall.constants ]; then
+    . /etc/firewall/firewall.constants
+else
+    echo "firewall: No constants file found at /etc/firewall/firewall.constants; "
+    exit 1
+fi
+
+
 case "$1" in
 	start)
 		echo "Starting Firewall services"
@@ -153,19 +161,24 @@ case "$1" in
 			exit 1
 		fi
 		
-      echo "ifconfig line: "
-      echo $( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' )
-      echo
-      EXTERNAL_IP=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $1}' )
-      EXT_NETMASK=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $3}' ) 
-      EXTERNAL_NETWORK=$( ipcalc -n $EXTERNAL_IP $EXT_NETMASK | grep Network | sed 's/\/[0-9].*//g' | awk '{print $2}' )
-      BROADCAST_NET=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $2}' )
+      if [ -z "$EXTERNAL_IP" ]; then
+          EXTERNAL_IP=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $1}' )
+      fi
+      if [ -z "$EXT_NETMASK" ]; then 
+          EXT_NETMASK=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $3}' ) 
+      fi
+      if [ -z "$EXTERNAL_NETWORK" ]; then 
+          EXTERNAL_NETWORK=$( ipcalc -n $EXTERNAL_IP $EXT_NETMASK | grep Network | sed 's/\/[0-9].*//g' | awk '{print $2}' )
+      fi
+      if [ -z "$BROADCAST_NET" ]; then
+          BROADCAST_NET=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $2}' )
+      fi
 
+      echo
       echo "External IP: ${EXTERNAL_IP}"
       echo "External Netmask: ${EXT_NETMASK}"
       echo "External Network: ${EXTERNAL_NETWORK}"
       echo "External Interface: ${EXTERNAL_INTERFACE}"
-      echo
       echo
 
       if [ -z "$EXTERNAL_IP" ]; then
@@ -413,7 +426,6 @@ case "$1" in
       #
       if [ $SSH_CLIENT -gt 0 ]; then
          enable_outbound_service 22 $ANYWHERE "SSH"
-         enable_outbound_service 7500 $ANYWHERE "SSH"
       fi
       
       #
@@ -594,6 +606,7 @@ case "$1" in
       #
       if [ $HTTP_SERVER -gt 0 ]; then
          enable_inbound_service 80 $ANYWHERE "HTTP"
+         enable_inbound_service 8080 $ANYWHERE "HTTP"
       fi
 
       #
