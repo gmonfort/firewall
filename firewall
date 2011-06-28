@@ -1,0 +1,770 @@
+#!/bin/sh -e
+### BEGIN INIT INFO
+# Provides:          firewall
+# Required-Start:    $local_fs $remote_fs $network $syslog
+# Required-Stop:     $local_fs $remote_fs $network $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# X-Interactive:     true
+# Short-Description: Start/stop custom firewall 
+### END INIT INFO
+#
+# firewall		Iptables based firewall startup/shutdown script
+#
+
+set -e
+if [ -x /sbin/iptables ] ; then
+   	IPTABLES=/sbin/iptables
+else
+	echo "Iptables is not available ... exiting"
+	exit 0
+fi
+
+#. /lib/lsb/init-functions
+
+if [ ! -d /var/lock/subsys ]; then
+	mkdir -p /var/lock/subsys
+fi
+
+# Enable a TCP service on the server
+# $1 - port
+# $2 - client
+# #3 - service name
+#
+enable_inbound_service() {
+   port=$1
+   client=$2
+   service=$3
+   #echo "INBOUND service: ${service}, port: ${port}, client: ${client}"
+   $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p TCP \
+      --sport $UNPRIVPORTS --dport $port -s $client -d $EXTERNAL_IP -j ACCEPT
+   $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p TCP -m state --state ESTABLISHED,RELATED \
+      --sport $port --dport $UNPRIVPORTS -s $EXTERNAL_IP -d $client -j ACCEPT
+   if [ $VERBOSE -gt 0 ]; then
+      echo "firewall: Inbound Service $service enabled on port $port for client $client"
+   fi
+}
+
+# Enable the server to use an external TCP service
+# $1 - port
+# $2 - server
+# #3 - service name
+#
+enable_outbound_service() {
+   port=$1
+   server=$2
+   service=$3
+   $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p TCP \
+      --sport $UNPRIVPORTS --dport $port -s $EXTERNAL_IP -d $server -j ACCEPT
+   $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p TCP -m state --state ESTABLISHED,RELATED \
+      --sport $port --dport $UNPRIVPORTS -s $server -d $EXTERNAL_IP -j ACCEPT
+   if [ $VERBOSE -gt 0 ]; then
+      echo "firewall: Outbound Service $service enabled on port $port for server $server"
+   fi
+}
+
+shutdown_firewall() {
+   echo "Shutting down Firewall services"
+
+   # Flush the rule chains
+   $IPTABLES -F
+
+   # Delete custom chains
+   $IPTABLES -X
+
+   # Zero counts
+   $IPTABLES -Z
+
+   # Set the default policy to DROP
+   $IPTABLES -P INPUT DROP
+   $IPTABLES -P OUTPUT DROP
+   $IPTABLES -P FORWARD DROP
+
+   # Allow unlimited traffic on the loopback interface
+   $IPTABLES -A INPUT -i $LOOPBACK_INTERFACE -j ACCEPT
+   $IPTABLES -A OUTPUT -o $LOOPBACK_INTERFACE -j ACCEPT
+
+   rm -f /var/lock/subsys/firewall
+   echo
+}
+
+disable_firewall() {
+   echo "DISABLING Firewall services"
+
+   # Flush the rule chains
+   $IPTABLES -F
+
+   # Delete custom chains
+   $IPTABLES -X
+
+   # Zero counts
+   $IPTABLES -Z
+
+   # Set the default policy to DROP
+   $IPTABLES -P INPUT ACCEPT
+   $IPTABLES -P OUTPUT ACCEPT
+   $IPTABLES -P FORWARD ACCEPT
+
+   rm -f /var/lock/subsys/firewall
+   echo
+}
+
+case "$1" in
+	start)
+		echo "Starting Firewall services"
+		echo "firewall: Configuring Firewall Rules using iptables"
+
+	 	# Remove any existing rules from all chains
+		$IPTABLES -F
+		$IPTABLES -F -t nat
+		$IPTABLES -F -t mangle
+
+		# Remove any pre-existing user-defined chains
+		$IPTABLES -X
+		$IPTABLES -X -t nat
+		$IPTABLES -X -t mangle
+
+		# Zero counts
+		$IPTABLES -Z
+
+		# Set the default policy to drop
+		$IPTABLES -P INPUT   DROP
+		$IPTABLES -P OUTPUT  DROP
+		$IPTABLES -P FORWARD DROP
+
+		# Allow unlimited traffic on the loopback interface
+		$IPTABLES -A INPUT -i $LOOPBACK_INTERFACE -j ACCEPT
+		$IPTABLES -A OUTPUT -o $LOOPBACK_INTERFACE -j ACCEPT
+
+        #
+        # Open the configuration file
+        #
+		if [ -f /etc/firewall/firewall.conf ]; then
+			. /etc/firewall/firewall.conf
+		else
+			# Turn off IP Forwarding & Masquerading
+			echo 0 >/proc/sys/net/ipv4/ip_forward
+	
+			# Turn off dynamic IP hacking
+		    echo "0" > /proc/sys/net/ipv4/ip_dynaddr
+	
+			echo "firewall: No configuration file found at /etc/firewall/firewall.conf; "
+			echo "firewall: default policies set to DROP on INPUT/OUTPUT/FORWARD chains."
+			exit 1
+		fi
+		
+      echo "ifconfig line: "
+      echo $( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' )
+      echo
+      EXTERNAL_IP=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $1}' )
+      EXT_NETMASK=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $3}' ) 
+      EXTERNAL_NETWORK=$( ipcalc -n $EXTERNAL_IP $EXT_NETMASK | grep Network | sed 's/\/[0-9].*//g' | awk '{print $2}' )
+      BROADCAST_NET=$( ifconfig $EXTERNAL_INTERFACE | grep 'inet[^6]' | sed 's/[a-zA-Z:]//g' | awk '{print $2}' )
+
+      echo "External IP: ${EXTERNAL_IP}"
+      echo "External Netmask: ${EXT_NETMASK}"
+      echo "External Network: ${EXTERNAL_NETWORK}"
+      echo "External Interface: ${EXTERNAL_INTERFACE}"
+      echo
+      echo
+
+      if [ -z "$EXTERNAL_IP" ]; then
+         echo "No external IP, stopping ..."
+         disable_firewall
+         exit 1
+      fi
+
+      if [ -z "$EXT_NETMASK" ]; then
+         echo "No external Netmask, stopping ..."
+         disable_firewall
+         exit 1
+      fi
+		
+      if [ -z "$EXTERNAL_NETWORK" ]; then
+         echo "No external Network, stopping ..."
+         disable_firewall
+         exit 1
+      fi
+		
+      if [ -z "$BROADCAST_NET" ]; then
+         echo "No Broadcast Net, stopping ..."
+         disable_firewall
+         exit 1
+      fi
+
+      #
+      # Custom rules
+      #
+      # The /etc/firewall/firewall.local file should contain rules in
+      # standard 'iptables' format.
+      #
+      if [ -f /etc/firewall/firewall.local ]; then
+          . /etc/firewall/firewall.local
+          echo "firewall: Local rules added"
+      else
+          echo "firewall: Local rules file not found."
+      fi
+
+      ##
+      ## Custom Chains
+      ##
+	
+      # LnD CHAIN: LOG and DROP packets. Generic
+      $IPTABLES -N LnD
+      $IPTABLES -A LnD -p tcp -m limit --limit 1/s -j LOG --log-prefix "[TCP drop] " --log-level=info
+      $IPTABLES -A LnD -p udp -m limit --limit 1/s -j LOG --log-prefix "[UDP drop] " --log-level=info
+      $IPTABLES -A LnD -p icmp -m limit --limit 1/s -j LOG --log-prefix "[ICMP drop] " --log-level=info
+      $IPTABLES -A LnD -f -m limit --limit 1/s -j LOG --log-prefix "[FRAG drop] " --log-level=info
+      $IPTABLES -A LnD -j DROP
+
+      # LnR CHAIN: LOG and REJECT packets. Generic
+      $IPTABLES -N LnR
+      $IPTABLES -A LnR -p tcp -m limit --limit 1/s -j LOG --log-prefix "[TCP reject] " --log-level=info
+      $IPTABLES -A LnR -p udp -m limit --limit 1/s -j LOG --log-prefix "[UDP reject] " --log-level=info
+      $IPTABLES -A LnR -p icmp -m limit --limit 1/s -j LOG --log-prefix "[ICMP reject] " --log-level=info
+      $IPTABLES -A LnR -f -m limit --limit 1/s -j LOG --log-prefix "[FRAG reject] " --log-level=info
+      $IPTABLES -A LnR -j REJECT
+
+      # ScanD CHAIN: Port Scanning
+      $IPTABLES -N ScanD
+      $IPTABLES -A ScanD -p tcp -m limit --limit 1/s -j LOG --log-prefix "[TCP Scan?] "
+      $IPTABLES -A ScanD -p udp -m limit --limit 1/s -j LOG --log-prefix "[UDP Scan?] "
+      $IPTABLES -A ScanD -p icmp -m limit --limit 1/s -j LOG --log-prefix "[ICMP Scan?] "
+      $IPTABLES -A ScanD -f -m limit --limit 1/s -j LOG --log-prefix "[FRAG Scan?] "
+      $IPTABLES -A ScanD -j DROP
+
+      # DDoS CHAIN: Possible DDoS or SYN-flood
+      $IPTABLES -N DDoS
+      $IPTABLES -A DDoS -m limit --limit 1/s --limit-burst 5 -j RETURN
+      $IPTABLES -A DDoS -j LOG --log-prefix "[DOS Attack/SYN Scan?] "
+      $IPTABLES -A DDoS -j DROP
+
+      # Banned CHAIN: For explicity banned addresses (/etc/firewall/firewall.banned)
+      $IPTABLES -N Banned	
+      $IPTABLES -A Banned -p tcp -m limit --limit 1/s -j LOG --log-prefix "[TCP Banned] " --log-level=info
+      $IPTABLES -A Banned -p udp -m limit --limit 1/s -j LOG --log-prefix "[UDP Banned] " --log-level=info
+      $IPTABLES -A Banned -p icmp -m limit --limit 1/s -j LOG --log-prefix "[ICMP Banned] " --log-level=info
+      $IPTABLES -A Banned -f -m limit --limit 1/s -j LOG --log-prefix "[FRAG Banned] " --log-level=info
+      $IPTABLES -A Banned -j DROP
+
+	  #
+      # Banned Addresses
+      #
+      # # /etc/firewall/firewall.banned contains a list of IPs
+      # to block all access, both inbound and outbound.
+      # The file should contain IP addresses with CIDR
+      # netmask, one per line:
+      #
+      # NOTE: No comments are allowed in the file.
+      #
+      # 111.0.0.0/8			- To block a Class-A network
+      # 111.222.0.0/16		- To block a Class-B network
+      # 111.222.254.0/24	- To block a Class-C network
+      # 111.222.254.244/32	- To block a single IP address
+      if [ -f /etc/firewall/firewall.banned ]; then
+         while read BANNED; do
+            $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $BANNED -j Banned
+            $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $BANNED -j Banned
+            $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $BANNED -j Banned
+            $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $BANNED -j Banned
+            $IPTABLES -A FORWARD -d $BANNED -j Banned
+            $IPTABLES -A FORWARD -s $BANNED -j Banned
+         done < /etc/firewall/firewall.banned
+         echo "firewall: Banned addresses added to rule set"
+      else
+         echo "firewall: Banned address/network file not found."
+      fi
+
+      #
+      # ipv4 stuff y demas
+      #
+
+      # Enable broadcast echo Protection
+      echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+
+      # Disable Source Routed Packets
+      for f in /proc/sys/net/ipv4/conf/*/accept_source_route; do
+         echo 0 > $f
+      done
+
+      # Enable TCP SYN Cookie Protection
+      echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+
+      # Disable ICMP Redirect Acceptance
+      for f in /proc/sys/net/ipv4/conf/*/accept_redirects; do
+            echo 0 > $f
+      done
+
+      # Don't send Redirect Messages
+      for f in /proc/sys/net/ipv4/conf/*/send_redirects; do
+               echo 0 > $f
+      done
+
+      # Disable ICMP Redirect Acceptance
+      for f in /proc/sys/net/ipv4/conf/*/accept_redirects; do
+         echo 0 > $f
+      done
+
+      # Drop Spoofed Packets coming in on an interface, which if replied to,
+      # would result in the reply going out a different interface.
+      for f in /proc/sys/net/ipv4/conf/*/rp_filter; do
+            echo 1 > $f
+      done
+
+      # Log packets with impossible addresses.
+      for f in /proc/sys/net/ipv4/conf/*/log_martians; do
+            echo 1 > $f
+      done
+
+      ##
+      ## PORT SCANNERS
+      ##
+
+      # All of the bits are cleared
+      $IPTABLES -A INPUT -p tcp --tcp-flags ALL NONE -j ScanD
+      # SYN and FIN are both set
+      $IPTABLES -A INPUT -p tcp --tcp-flags SYN,FIN SYN,FIN -j ScanD
+      # SYN and RST are both set
+      $IPTABLES -A INPUT -p tcp --tcp-flags SYN,RST SYN,RST -j ScanD
+      # FIN and RST are both set
+      $IPTABLES -A INPUT -p tcp --tcp-flags FIN,RST FIN,RST -j ScanD
+      # FIN is the only bit set, without the expected accompanying ACK
+      $IPTABLES -A INPUT -p tcp --tcp-flags ACK,FIN FIN -j ScanD
+      # PSH is the only bit set, without the expected accompanying ACK
+      $IPTABLES -A INPUT -p tcp --tcp-flags ACK,PSH PSH -j ScanD
+      # URG is the only bit set, without the expected accompanying ACK
+      $IPTABLES -A INPUT -p tcp --tcp-flags ACK,URG URG -j ScanD
+
+      # SYN-Flood 
+      # (Request for new connection; large number indicate possible DDoS-type attack; same as --syn)
+      $IPTABLES -A INPUT -p tcp --tcp-flags SYN,RST,ACK SYN -j DDoS
+
+      # Refuse directed broadcasts; you may choose not to log these, as they can fill up your logs quickly
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $EXTERNAL_NETWORK \
+         -m limit --limit 1/s -j LOG --log-prefix "[Directed Broadcast] "
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $EXTERNAL_NETWORK -j DROP
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $BROADCAST_NET \
+         -m limit --limit 1/s -j LOG --log-prefix "[Directed Broadcast] "
+      $IPTABLES -A INPUT  -i $EXTERNAL_INTERFACE -d $BROADCAST_NET -j DROP
+
+      # Refuse limited broadcasts
+      $IPTABLES -A INPUT  -i $EXTERNAL_INTERFACE -d 255.255.255.255 \
+         -m limit --limit 1/s -j LOG --log-prefix "[Limited Broadcast] "
+      $IPTABLES -A INPUT  -i $EXTERNAL_INTERFACE -d 255.255.255.255 -j DROP
+
+      #
+      # ICMP
+      #
+
+      # (4) Source Quench.
+      # Incoming & outgoing requests to slow down (flow control)
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p ICMP --icmp-type 4 \
+         -s $ANYWHERE  -d $EXTERNAL_IP -j ACCEPT
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP --icmp-type 4 \
+         -s $EXTERNAL_IP  -d $ANYWHERE -j ACCEPT
+
+      # (12) Parameter Problem.
+      # Incoming & outgoing error messages
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p ICMP --icmp-type 12 \
+         -s $ANYWHERE  -d $EXTERNAL_IP -j ACCEPT
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP --icmp-type 12 \
+         -s $EXTERNAL_IP  -d $ANYWHERE -j ACCEPT
+
+      # (3) Destination Unreachable, Service Unavailable.
+      # Incoming & outgoing size negotiation, service or
+      # destination unavailability, final traceroute response
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p ICMP --icmp-type 3 \
+         -s $ANYWHERE  -d $EXTERNAL_IP -j ACCEPT
+
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP --icmp-type 3 \
+         -s $EXTERNAL_IP  -d $ANYWHERE -j ACCEPT
+
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP --icmp-type fragmentation-needed \
+         -s $EXTERNAL_IP  -d $ANYWHERE -j ACCEPT
+
+      # (0|8) Allow OUTPUT pings to anywhere.
+      if [ $OUTBOUND_PING -gt 0 ]; then
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP --icmp-type 8 \
+            -s $EXTERNAL_IP  -d $ANYWHERE -j ACCEPT
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p ICMP --icmp-type 0 \
+            -s $ANYWHERE  -d $EXTERNAL_IP -j ACCEPT
+         if [ $VERBOSE -gt 0 ]; then
+            echo "firewall: Outbound ping enabled"
+         fi
+      fi
+
+      # (0|8) Allow incoming pings from anywhere (stops at firewall).
+      if [ $INBOUND_PING -gt 0 ]; then
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p ICMP --icmp-type 8 \
+            -s $ANYWHERE  -d $EXTERNAL_IP -j ACCEPT
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP --icmp-type 0 \
+            -s $EXTERNAL_IP  -d $ANYWHERE -j ACCEPT
+         if [ $VERBOSE -gt 0 ]; then
+            echo "firewall: Inbound ping enabled"
+         fi
+      fi
+
+      ##
+      ## SERVICES
+      ##
+      
+      #
+      # SSH Client (22)
+      #
+      if [ $SSH_CLIENT -gt 0 ]; then
+         enable_outbound_service 22 $ANYWHERE "SSH"
+         enable_outbound_service 7500 $ANYWHERE "SSH"
+      fi
+      
+      #
+      # SSH Server (22)
+      #
+      if [ $SSH_SERVER -gt 0 ]; then
+         enable_inbound_service $SSH_PORT $ANYWHERE "SSH"
+      fi
+      
+      #
+      # Rsync (873)
+      #
+      if [ $RSYNC_CLIENT -gt 0 ]; then
+         enable_outbound_service 873 $ANYWHERE "Rsync"
+      fi
+
+      #
+      # DNS client modes (53)
+      #
+      if [ $DNS_CLIENT -gt 0 ]; then
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+            --sport $UNPRIVPORTS --dport 53 -s $EXTERNAL_IP \
+            -d $ANYWHERE -j ACCEPT
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -m state --state ESTABLISHED,RELATED -p UDP --sport 53 \
+            --dport $UNPRIVPORTS -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         # TCP client-to-server requests are allowed by the protocol
+         # if UDP requests fail. This is rarely seen. Usually, clients
+         # use TCP as a secondary name server for zone transfers from
+         # their primary name servers, and as hackers.
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p TCP \
+            --sport $UNPRIVPORTS --dport 53 -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p TCP -m state --state ESTABLISHED,RELATED \
+            --sport 53 --dport $UNPRIVPORTS -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         if [ $VERBOSE -gt 0 ]; then
+            echo "firewall: DNS client enabled"
+         fi
+      fi
+
+      #
+      # DNS caching & forwarding name server
+      #
+      if [ $DNS_CACHING_SERVER -gt 0 ]; then
+         # Server-to-server query or response
+         # Caching only name server uses UDP, not TCP
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p UDP \
+            --sport 53 --dport 53 -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+            --sport 53 --dport 53 -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
+         if [ $VERBOSE -gt 0 ]; then
+            echo "firewall: DNS Caching server enabled"
+         fi
+      fi
+
+      #
+      # DNS full name server
+      #
+      if [ $DNS_FULL_SERVER -gt 0 ]; then
+         # Client-to-server DNS transaction.
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p UDP \
+            --sport $UNPRIVPORTS --dport 53 -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+            --sport 53 --dport $UNPRIVPORTS -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p UDP \
+            --sport 53 --dport 53 -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+            --sport 53 --dport 53 -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
+         # Zone Transfers.
+         # Due to the potential danger of zone transfers,
+         # allow TCP traffic to only specific secondaries.
+         # /etc/firewall/firewall.dns contains a list of
+         # secondary, tertiary, etc. domain name servers with which
+         # zone transfers are allowed.  The file should contain IP
+         # addresses with CIDR netmask, one per line:
+         if [ -f /etc/firewall/firewall.dns ]; then
+            while read DNS_SECONDARY; do
+                  $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p TCP \
+                     --sport $UNPRIVPORTS --dport 53 -s $DNS_SECONDARY -d $EXTERNAL_IP -j ACCEPT
+                  $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p TCP -m state --state ESTABLISHED,RELATED \
+                     --sport 53 --dport $UNPRIVPORTS -s $EXTERNAL_IP -d $DNS_SECONDARY -j ACCEPT
+               done < /etc/firewall/firewall.dns
+         else
+               echo "firewall: ** No secondary DNS configured **"
+         fi
+         if [ $VERBOSE -gt 0 ]; then
+               echo "firewall: DNS Full server enabled"
+         fi
+      fi
+
+      #
+      # SMTP server (25)
+      #
+      if [ $SMTP_LOCAL_SERVER -gt 0 ]; then
+         enable_inbound_service 25 $ANYWHERE "SMTP"
+         enable_outbound_service 25 $ANYWHERE "SMTP"
+      fi
+
+      #
+      # Secure SMTP server (465)
+      #
+      if [ $SSMTP_LOCAL_SERVER -gt 0 ]; then
+         enable_inbound_service 465 $ANYWHERE "Secure SMTP"
+         enable_outbound_service 465 $ANYWHERE "Secure SMTP"
+      fi
+
+      #
+      # SMTP TLS server (587)
+      #
+      if [ $TLS_LOCAL_SERVER -gt 0 ]; then
+         enable_inbound_service 587 $ANYWHERE "Secure SMTP"
+         enable_outbound_service 587 $ANYWHERE "Secure SMTP"
+      fi
+
+      #
+      # POP3 server (110)
+      #
+      if [ $POP3_SERVER -gt 0 ]; then
+         enable_inbound_service 110 $ANYWHERE "POP3"
+      fi
+
+      #
+      # POP3S (995)
+      #
+      if [ $POP3S_SERVER -gt 0 ]; then
+         enable_inbound_service 995 $ANYWHERE "POP3S"
+      fi
+      
+      #
+      # IMAP (143)
+      #
+      if [ $IMAP_SERVER -gt 0 ]; then
+         enable_inbound_service 143 $ANYWHERE "IMAP"
+         
+         enable_outbound_service 143 $ANYWHERE "IMAP" # [HOME]
+      fi
+
+      #
+      # IMAPS (993)
+      #
+      if [ $IMAPS_SERVER -gt 0 ]; then
+         enable_inbound_service 993 $ANYWHERE "IMAPS"
+      fi
+
+      #
+      # FTP (20, 21)
+      #
+#     if [ $FTP_SERVER -gt 0 ]; then
+#         /sbin/modprobe ip_conntrack
+#         /sbin/modprobe ip_conntrack_ftp
+#         # /sbin/modprobe ip_nat_ftp   # load if FTP server behind NATted firewall
+#
+#         $IPTABLES -A INPUT -p tcp -i $EXTERNAL_INTERFACE -s $ANYWHERE \
+#            --sport 1024:65535 -d $EXTERNAL_IP --dport 21 -m state --state NEW,ESTABLISHED -j ACCEPT
+#         $IPTABLES -A OUTPUT -p tcp -o $EXTERNAL_INTERFACE -s $EXTERNAL_IP \
+#            --sport 21 -d $ANYWHERE --dport 1024:65535 -m state --state ESTABLISHED -j ACCEPT
+#         $IPTABLES -A INPUT -p tcp -i $EXTERNAL_INTERFACE -s $ANYWHERE \
+#            --sport 1024:65535 -d $EXTERNAL_IP --dport 1024:65535 -m state --state ESTABLISHED,RELATED -j ACCEPT
+#         $IPTABLES -A OUTPUT -p tcp -o $EXTERNAL_INTERFACE -s $EXTERNAL_IP \
+#            --sport 1024:65535 -d $ANYWHERE --dport 1024:65535 -m state --state ESTABLISHED -j ACCEPT
+#         $IPTABLES -A OUTPUT -p tcp -o $EXTERNAL_INTERFACE -s $EXTERNAL_IP \
+#            --sport 20 -d $ANYWHERE --dport 1024:65535 -m state --state ESTABLISHED,RELATED -j ACCEPT
+#         $IPTABLES -A INPUT -p tcp -i $EXTERNAL_INTERFACE -s $ANYWHERE \
+#            --sport 1024:65535 -d $EXTERNAL_IP --dport 20 -m state --state ESTABLISHED -j ACCEPT
+#         
+#         if [ $VERBOSE -gt 0 ]; then
+#            echo "firewall: Remote clients may access local FTP server"
+#         fi
+#     fi
+
+      #
+      # HTTP CLIENT (80) - Accessing remote web sites as a client
+      #
+      if [ $HTTP_CLIENT -gt 0 ]; then
+         enable_outbound_service 80 $ANYWHERE "HTTP"
+      fi
+
+      #
+      # HTTP SERVER (80) - Allowing remote access to a local web server
+      #
+      if [ $HTTP_SERVER -gt 0 ]; then
+         enable_inbound_service 80 $ANYWHERE "HTTP"
+      fi
+
+      #
+      # HTTP CLIENT (443) - Accessing remote web sites over SSL as a client
+      #
+      if [ $HTTPS_CLIENT -gt 0 ]; then	
+         enable_outbound_service 443 $ANYWHERE "HTTPS"
+      fi
+
+      #
+      # HTTP SERVER (443) - Allowing remote access to a local SSL web server
+      #
+      if [ $HTTPS_SERVER -gt 0 ]; then	
+         enable_inbound_service 443 $ANYWHERE "HTTPS"
+      fi
+
+      #
+      # NTP (123) - Accessing remote Network Time Servers
+      #
+      if [ $NTP_CLIENT -gt 0 ]; then
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+            --sport $UNPRIVPORTS --dport 123 -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p UDP \
+            --sport 123 --dport $UNPRIVPORTS -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+            --sport 123 --dport 123 -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p UDP \
+            --sport 123 --dport 123 -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+         if [ $VERBOSE -gt 0 ]; then
+            echo "firewall: NTP Client enabled"
+         fi
+      fi
+
+      if [ $MYSQL_CLIENT -gt 0 ]; then
+         enable_outbound_service 3306 $ANYWHERE "MySql"
+      fi
+
+      if [ $MYSQL_SERVER -gt 0 ]; then
+         enable_inbound_service 3306 $ANYWHERE "MySql"
+      fi
+
+      if [ $RSYNC_CLIENT -gt 0 ]; then
+         enable_outbound_service 873 $ANYWHERE "RSYNC"
+      fi
+
+      if [ $RSYNC_SERVER -gt 0 ]; then
+         enable_inbound_service 873 $ANYWHERE "RSYNC"
+      fi
+
+      ##
+      ## Spoofing and Bad Addresses
+      ##
+
+      # Refuse spoofed packets.
+      # Ignore blatantly illegal source addresses.
+      # Protect yourself from sending to bad addresses.
+      # Refuse spoofed packets pretending to be from
+      # the external interface's IP address.
+      
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $EXTERNAL_IP -j LnD
+      
+      # Get first two octets of external IP address
+      OCT1=$( ifconfig $EXTERNAL_INTERFACE | sed -n '2s/^.*inet addr:\([0-9][0-9]*\).*/\1/p' )
+      OCT2=$( ifconfig $EXTERNAL_INTERFACE | sed -n '2s/^.*inet addr:\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' )
+      OCT3=$( echo $OCT2 | sed 's/^[0-9].\.//g' )
+      
+      if [ $OCT1 != "10" ]; then
+         # Refuse packets claiming to be to or from a Class-A private network.
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $CLASS_A -j LnD
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $CLASS_A -j LnD
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $CLASS_A -j LnD
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $CLASS_A -j LnD
+      fi
+      
+      if [ $OCT1 != "172" ]; then  
+         # Refuse packets claiming to be to or from a Class-B private network.
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $CLASS_B -j LnD
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $CLASS_B -j LnD
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $CLASS_B -j LnD
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $CLASS_B -j LnD
+      fi
+
+      if [ $OCT1 = "172" ]; then
+         if [ $OCT3 -lt "15" ] || [ $OCT3 -gt "31" ]; then 	
+            # Refuse packets claiming to be to or from a Class-B private network.
+            $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $CLASS_B -j LnD
+            $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $CLASS_B -j LnD
+            $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $CLASS_B -j LnD
+            $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $CLASS_B -j LnD
+         fi
+      fi
+
+      if [ $OCT2 != "192.168" ]; then
+         # Refuse packets claiming to be to or from a Class-C private network.
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $CLASS_C -j LnD
+         $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $CLASS_C -j LnD
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $CLASS_C -j LnD
+         $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $CLASS_C -j LnD
+      fi
+
+      # Refuse packets claiming to be from the loopback.
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $LOOPBACK_NETWORK -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $LOOPBACK_NETWORK -j LnD
+
+      # Refuse malformed broadcast packets.
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $BROADCAST_DEST -j LnD
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -d $BROADCAST_SRC  -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $BROADCAST_DEST -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $BROADCAST_SRC  -j LnD
+
+      # Refuse Class-D Multicast addresses.
+      # Multicast is only illegal as a source address.
+      # Multicast uses UDP.
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $CLASS_D_MULTICAST -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -s $CLASS_D_MULTICAST -j LnR
+
+      # Refuse Class-E reserved IP addresses.
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -s $CLASS_E_RESERVED_NET -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -d $CLASS_E_RESERVED_NET -j LnR
+
+      # -------------------------------------------------------------
+      #
+      # DROP (on input), REJECT (output) and LOG anything else on the external (red) interface
+      #
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p TCP \
+         -s $ANYWHERE -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p TCP \
+         -s $ANYWHERE -j LnR
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p UDP \
+         -s $ANYWHERE -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p UDP \
+         -s $ANYWHERE -j LnR
+      $IPTABLES -A INPUT -i $EXTERNAL_INTERFACE -p ICMP \
+         -s $ANYWHERE -j LnD
+      $IPTABLES -A OUTPUT -o $EXTERNAL_INTERFACE -p ICMP \
+         -s $ANYWHERE -j LnR
+      # -------------------------------------------------------------
+
+      # Zero counts
+      $IPTABLES -Z
+
+      echo "done"
+      touch /var/lock/subsys/firewall
+      echo
+   ;;
+   
+   status)
+		if [ -f /var/lock/subsys/firewall ]; then
+			echo "Firewall started and configured"
+		else
+			echo "Firewall stopped"
+		fi
+		exit 0
+	;;
+
+	restart|reload)
+		$0 stop
+		$0 start
+	;;
+
+	stop)
+     shutdown_firewall 
+	;;
+	
+	disable)
+      disable_firewall
+	;;
+	
+	*)
+		echo "Usage: $0 {start|stop|status|restart|reload|disable}"
+		exit 1
+esac
+
+exit 0

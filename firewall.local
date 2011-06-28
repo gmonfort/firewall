@@ -1,0 +1,11 @@
+#iptables -A INPUT -i $EXTERNAL_INTERFACE -s xxx.yyy.zzz.0/24 -d $BROADCAST_NET -j DROP
+#iptables -A INPUT -i $EXTERNAL_INTERFACE -s 111.222.111.241 -p TCP -j REJECT
+
+#iptables -A INPUT -i $EXTERNAL_INTERFACE -p TCP -m state --state ESTABLISHED,RELATED \
+#	--sport 80 --dport 52642 -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+	
+#iptables -A INPUT -i $EXTERNAL_INTERFACE -p TCP \
+#	--sport $UNPRIVPORTS --dport 3306 -s $ANYWHERE -d $EXTERNAL_IP -j ACCEPT
+
+#iptables -A OUTPUT -o $EXTERNAL_INTERFACE -p TCP -m state --state ESTABLISHED,RELATED \
+#	--sport 3306 --dport $UNPRIVPORTS -s $EXTERNAL_IP -d $ANYWHERE -j ACCEPT
