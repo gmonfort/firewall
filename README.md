@@ -19,6 +19,7 @@ In order to install you have two options:
 
 ## Configuration
 * Edit /etc/firewall.conf as needed
+* Add your DNS servers to /etc/firewall.dns 
 * Add IP addresses to blacklist to /etc/firewall/firewall.banned
 * Add custom iptables rules to /etc/firewall/firewall.local
 
